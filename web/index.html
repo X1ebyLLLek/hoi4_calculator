@@ -1,0 +1,656 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>HoI4 1.19.5.0 — Калькулятор дивизий и Симулятор сражений</title>
+<style>
+:root{--bg:#14181d;--card:#1e242b;--card2:#252c35;--acc:#d49b35;--txt:#e8ecf0;--mut:#9aa5b1;--bdr:#333c47;--red:#ff6b6b;--blu:#5ca8ff;--grn:#6be084}
+*{box-sizing:border-box}
+body{font-family:'Segoe UI',system-ui,sans-serif;background:var(--bg);color:var(--txt);margin:0;padding:16px;font-size:14px}
+header{display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid var(--bdr);padding-bottom:10px;margin-bottom:14px;flex-wrap:wrap;gap:10px}
+h1{font-size:20px;margin:0;color:var(--acc)}
+.ver{font-size:12px;color:var(--mut);background:var(--card2);padding:4px 10px;border-radius:12px}
+.tabs{display:flex;gap:6px}
+.tab{background:var(--card2);color:var(--txt);border:1px solid var(--bdr);padding:7px 14px;border-radius:6px;cursor:pointer;font-weight:600}
+.tab.active{background:var(--acc);color:#111;border-color:var(--acc)}
+.panel{display:none}.panel.active{display:block}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+.grid4{display:grid;grid-template-columns:repeat(auto-fill,minmax(175px,1fr));gap:10px}
+@media(max-width:980px){.grid2{grid-template-columns:1fr}}
+.card{background:var(--card);border:1px solid var(--bdr);border-radius:8px;padding:14px}
+h2{font-size:15px;margin:0 0 10px;color:var(--acc);border-bottom:1px solid var(--bdr);padding-bottom:5px}
+h3{font-size:13px;margin:10px 0 6px;color:var(--mut);text-transform:uppercase;letter-spacing:.4px}
+label{display:block;font-size:12px;color:var(--mut);margin:4px 0 2px}
+select,input[type=number],input[type=text]{background:var(--bg);color:var(--txt);border:1px solid var(--bdr);border-radius:4px;padding:5px 7px;width:100%;font-size:13px}
+.scroll{max-height:240px;overflow-y:auto;border:1px solid var(--bdr);border-radius:4px;padding:6px;background:var(--bg)}
+.brow{display:flex;align-items:center;gap:8px;padding:2px 0;font-size:13px}
+.brow span{flex:1}.brow small{color:var(--mut)}.brow input{width:58px;text-align:center}
+.chk{display:flex;align-items:center;gap:6px;padding:2px 0;font-size:13px;cursor:pointer}
+.chk input{width:auto}
+.btn{background:var(--acc);color:#111;border:0;padding:9px 16px;border-radius:6px;cursor:pointer;font-weight:700;font-size:13px;margin-top:10px;margin-right:8px}
+.btn.sec{background:var(--card2);color:var(--txt);border:1px solid var(--bdr)}
+.btn:hover{filter:brightness(1.08)}
+table{border-collapse:collapse;width:100%;font-size:13px}
+td,th{padding:4px 7px;border-bottom:1px solid var(--bdr);text-align:left}
+th{color:var(--mut);font-weight:600}
+.stat-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin-top:8px}
+.kpi{background:var(--bg);border:1px solid var(--bdr);border-radius:5px;padding:6px 8px}
+.kpi b{display:block;font-size:15px;color:var(--txt)}.kpi span{font-size:11px;color:var(--mut)}
+.warn{color:var(--red);font-size:12px;margin-top:4px}
+.win-banner{font-size:18px;font-weight:700;margin-bottom:8px}
+.win-attacker{color:var(--red)}.win-defender{color:var(--blu)}.win-draw{color:var(--acc)}
+canvas{width:100%;height:220px;background:var(--bg);border:1px solid var(--bdr);border-radius:6px;display:block}
+</style>
+</head>
+<body>
+<header>
+  <div><h1>HoI4 Калькулятор и Симулятор Сражений</h1></div>
+  <div class="tabs">
+    <button class="tab active" onclick="showTab('sim',this)">⚔ Шаблоны и Бой</button>
+    <button class="tab" onclick="showTab('arena',this)">🏆 Арена (Мета-поиск)</button>
+    <button class="tab" onclick="showTab('eq',this)">📦 Снаряжение по годам</button>
+    <button class="tab" onclick="showTab('tank',this)">🛡 Конструктор танков</button>
+  </div>
+  <div class="ver" id="ver">Загрузка данных игры...</div>
+</header>
+
+<div id="tab_sim" class="panel active">
+  <div class="grid2" id="sides"></div>
+
+  <div class="card" style="margin-top:16px">
+    <h2>Условия сражения (Нападение vs Защита)</h2>
+    <div class="grid4" id="cfg"></div>
+    <button class="btn" onclick="simulate()">⚔ Симулировать бой</button>
+    <button class="btn sec" onclick="calcBoth()">Σ Пересчитать шаблоны</button>
+  </div>
+
+  <div class="card" style="margin-top:16px" id="result">
+    Настройте шаблоны и нажмите «⚔ Симулировать бой».
+  </div>
+</div>
+
+<div id="tab_arena" class="panel">
+  <div class="card">
+    <h2>🏆 Арена: Круговой турнир всех комбинаций шаблонов</h2>
+    <div class="grid4">
+      <div><label>Год технологий</label><input id="ar_year" type="number" value="1940" min="1936" max="1945"></div>
+      <div><label>Местность</label><select id="ar_ter"></select></div>
+      <div><label>Река</label><select id="ar_riv"><option value="none">Нет</option><option value="minor">Малая (-30%)</option><option value="major">Большая (-60%)</option></select></div>
+      <div><label>Форты (0–10)</label><input id="ar_fort" type="number" value="0" min="0" max="10"></div>
+      <div><label>Баланс сторон</label>
+        <select id="ar_mode">
+          <option value="width">По ширине фронта (удержание плитки)</option>
+          <option value="ic">Равный бюджет IC (экономический КПД)</option>
+        </select>
+      </div>
+      <div><label>Бюджет IC (для режима IC)</label><input id="ar_budget" type="number" value="10000" step="1000"></div>
+      <div><label>Военные заводы (для Эволюции)</label><input id="ar_fac" type="number" value="15" min="1" max="200"></div>
+      <div><label>IC/завод в день (ср. эфф.)</label><input id="ar_icday" type="number" value="3.6" step="0.1"></div>
+      <div><label><input type="checkbox" id="ar_tanks" checked style="width:auto"> Включить танки и космодесант</label></div>
+      <div><label><input type="checkbox" id="ar_spec" checked style="width:auto"> Включить горнострелков</label></div>
+    </div>
+    <button class="btn" onclick="runArena()">🏆 Запустить турнир Арены</button>
+    <button class="btn sec" onclick="runBudgetCurveUI()">💰 Пороги +200 IC (vs 1.5x враг)</button>
+    <button class="btn sec" onclick="runUpgradeStudy()">📈 Сравнение 25+5+5 монстров</button>
+    <button class="btn sec" onclick="runEvolutionUI()">🧬 Эволюционный поиск (с нуля 6/0)</button>
+    <div id="ar_status" style="margin-top:8px;color:var(--mut)"></div>
+  </div>
+  <div id="ar_study" style="margin-top:16px"></div>
+  <div id="ar_out" style="margin-top:16px"></div>
+</div>
+
+<div id="tab_eq" class="panel">
+  <div class="card">
+    <h2>Энциклопедия снаряжения из файлов HoI4</h2>
+    <div class="grid4" style="margin-bottom:10px">
+      <div><label>Поиск</label><input type="text" id="eq_search" placeholder="Название или ID..." oninput="renderEqTable()"></div>
+      <div><label>Год (до)</label><input type="number" id="eq_year" value="1948" oninput="renderEqTable()"></div>
+    </div>
+    <div style="overflow-x:auto"><table id="eq_table"></table></div>
+  </div>
+</div>
+
+<div id="tab_tank" class="panel">
+  <div class="card">
+    <h2>Конструктор танков (No Step Back / 1.19+)</h2>
+    <div class="grid4">
+      <div><label>Шасси</label><select id="tk_chassis" onchange="previewTank()"></select></div>
+      <div><label>Роль</label>
+        <select id="tk_role" onchange="previewTank()">
+          <option value="armor">Танк (Armor)</option>
+          <option value="anti_tank">ПТ-САУ (TD)</option>
+          <option value="artillery">САУ (SPArt)</option>
+          <option value="anti_air">ЗСУ (SPAA)</option>
+          <option value="flamethrower">Огнемётный (Flame)</option>
+        </select>
+      </div>
+      <div><label>Год технологий</label><input type="number" id="tk_year" value="1942" onchange="previewTank()"></div>
+    </div>
+    <button class="btn sec" onclick="previewTank(true)">Авто-мета модули</button>
+    <div id="tk_mods" class="grid4" style="margin-top:10px"></div>
+    <div id="tk_out" style="margin-top:12px"></div>
+  </div>
+</div>
+
+<script>
+let C = null;
+const CFG_FIELDS = [
+  ["terrain", "Местность", "sel_ter"],
+  ["extra_flanks", "Доп. фланги (0–3)", 0],
+  ["river", "Река", "sel_riv"],
+  ["fort_level", "Укрепления (0–10)", 0],
+  ["attacker_count", "Дивизий атаки", 6],
+  ["defender_count", "Дивизий обороны", 6],
+  ["attacker_planning", "Планирование (0–0.6)", 0.3],
+  ["defender_entrenchment_pct", "Окопанность (0–1)", 1.0],
+  ["attacker_general_skill", "Скилл ген. атаки", 3],
+  ["attacker_general_atk", "Атака ген. атаки", 3],
+  ["defender_general_skill", "Скилл ген. обороны", 3],
+  ["defender_general_def", "Оборона ген. обороны", 3],
+  ["air_superiority", "Воздух (-1..+1)", 0],
+  ["attacker_cas_dmg", "Штурмовики атаки", 0],
+  ["defender_cas_dmg", "Штурмовики обороны", 0],
+  ["supply_lack_atk", "Нехватка снабж. атаки (0–1)", 0],
+  ["supply_lack_def", "Нехватка снабж. обороны (0–1)", 0],
+  ["seed", "Seed", 42],
+];
+
+function showTab(id, btn) {
+  document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  document.getElementById('tab_' + id).classList.add('active');
+  btn.classList.add('active');
+}
+
+const optList = (arr, sel) => arr.map(x => `<option value="${x.id}" ${x.id===sel?'selected':''}>${x.name}</option>`).join('');
+const post = (u, b) => fetch(u, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(b)}).then(r => r.json());
+
+async function init() {
+  C = await (await fetch('/api/catalog')).json();
+  document.getElementById('ver').textContent = `HoI4 v${C.version} | Батальонов: ${C.line_units.length} | Снаряжения: ${C.equipment.length}`;
+
+  const grandOpts = Object.values(C.doctrines.grand).map(d => `<option value="${d.id}">${d.name}</option>`).join('');
+  const presetOpts = Object.entries(C.presets).map(([k, v]) => `<option value="${k}">${v.name}</option>`).join('');
+
+  for (const side of ['attacker', 'defender']) {
+    const defPreset = side === 'attacker' ? 'tank_30w_med' : 'inf_18w_hold';
+    document.getElementById('sides').insertAdjacentHTML('beforeend', `
+      <div class="card" id="${side}">
+        <h2>${side === 'attacker' ? '🔴 Нападающий (Атака)' : '🔵 Обороняющийся (Защита)'}</h2>
+        <div class="grid2">
+          <div><label>Готовый шаблон</label><select id="${side}_preset" onchange="loadPreset('${side}')"><option value="">— Свой —</option>${presetOpts}</select></div>
+          <div><label>Год технологий</label><input id="${side}_year" type="number" value="1940" min="1918" max="1948"></div>
+        </div>
+        <label>Великая доктрина (1.19+)</label>
+        <select id="${side}_doc"><option value="">Без доктрины</option>${grandOpts}</select>
+
+        <h3>Линейные батальоны (макс. 25)</h3>
+        <div class="scroll" id="${side}_bat">
+          ${C.line_units.map(u => `<div class="brow"><span>${u.name} <small>(${u.combat_width}w)</small></span><input type="number" min="0" max="25" value="0" id="${side}_b_${u.id}"></div>`).join('')}
+        </div>
+
+        <div class="grid2">
+          <div>
+            <h3>Роты поддержки (макс. 5)</h3>
+            <div class="scroll" id="${side}_sup">
+              ${C.support_units.map(u => `<label class="chk"><input type="checkbox" value="${u.id}"> ${u.name}</label>`).join('')}
+            </div>
+          </div>
+          <div>
+            <h3>Полковая поддержка 1.19+ (макс. 5)</h3>
+            <div class="scroll" id="${side}_reg">
+              ${C.regimental_units.map(u => `<label class="chk"><input type="checkbox" value="${u.id}"> ${u.name}</label>`).join('')}
+            </div>
+          </div>
+        </div>
+        <div id="${side}_stats" style="margin-top:10px"></div>
+      </div>
+    `);
+    document.getElementById(`${side}_preset`).value = defPreset;
+    loadPreset(side);
+  }
+
+  document.getElementById('cfg').innerHTML = CFG_FIELDS.map(([k, lbl, d]) => {
+    if (d === 'sel_ter') return `<div><label>${lbl}</label><select id="c_${k}">${optList(Object.values(C.terrains), 'plains')}</select></div>`;
+    if (d === 'sel_riv') return `<div><label>${lbl}</label><select id="c_${k}"><option value="none">Нет</option><option value="minor">Малая (-30%)</option><option value="major">Большая (-60%)</option></select></div>`;
+    return `<div><label>${lbl}</label><input id="c_${k}" type="number" step="any" value="${d}"></div>`;
+  }).join('');
+
+  document.getElementById('tk_chassis').innerHTML = C.tank_chassis.map(c => `<option value="${c.id}">${c.name} (${c.year})</option>`).join('');
+  document.getElementById('tk_chassis').value = 'medium_tank_chassis_2';
+  document.getElementById('ar_ter').innerHTML = optList(Object.values(C.terrains), 'plains');
+  renderEqTable();
+  previewTank(true);
+  await calcBoth();
+}
+
+function loadPreset(side) {
+  const t = C.presets[document.getElementById(side + '_preset').value];
+  if (!t) return;
+  document.getElementById(side + '_year').value = t.tech_year || 1940;
+  document.getElementById(side + '_doc').value = (t.doctrine && t.doctrine.grand) || '';
+  for (const u of C.line_units) {
+    document.getElementById(`${side}_b_${u.id}`).value = t.battalions[u.id] || 0;
+  }
+  document.querySelectorAll(`#${side}_sup input`).forEach(i => i.checked = (t.support || []).includes(i.value));
+  document.querySelectorAll(`#${side}_reg input`).forEach(i => i.checked = (t.regimental || []).includes(i.value));
+}
+
+function readTpl(side) {
+  const b = {};
+  for (const u of C.line_units) {
+    const v = +document.getElementById(`${side}_b_${u.id}`).value;
+    if (v > 0) b[u.id] = v;
+  }
+  const ch = s => [...document.querySelectorAll(`#${side}_${s} input:checked`)].map(i => i.value);
+  const grand = document.getElementById(side + '_doc').value;
+  return {
+    name: side === 'attacker' ? 'Атакующий' : 'Обороняющийся',
+    battalions: b,
+    support: ch('sup'),
+    regimental: ch('reg'),
+    tech_year: +document.getElementById(side + '_year').value,
+    doctrine: grand ? {grand, milestones: [true, true, true, true]} : {},
+  };
+}
+
+function readCfg() {
+  const o = {};
+  for (const [k, , d] of CFG_FIELDS) {
+    const el = document.getElementById('c_' + k);
+    o[k] = String(d).startsWith('sel') ? el.value : +el.value;
+  }
+  return o;
+}
+
+function statsHtml(s) {
+  const kpi = (lbl, val) => `<div class="kpi"><b>${val}</b><span>${lbl}</span></div>`;
+  return `
+    <div class="stat-grid">
+      ${kpi('Ширина / Батальоны', `${s.width}w (${s.line_count})`)}
+      ${kpi('Стоимость IC', s.ic_cost)}
+      ${kpi('Людские ресурсы', s.manpower)}
+      ${kpi('Организация', s.org)}
+      ${kpi('Прочность (HP)', s.hp)}
+      ${kpi('Скорость (км/ч)', s.speed)}
+      ${kpi('Мягкая атака', s.soft)}
+      ${kpi('Жёсткая атака', s.hard)}
+      ${kpi('Защита / Прорыв', `${s.defense} / ${s.brk}`)}
+      ${kpi('Броня / Пробитие', `${s.armor} / ${s.pierce}`)}
+      ${kpi('Твёрдость / ПВО', `${(s.hardness*100).toFixed(0)}% / ${s.air}`)}
+      ${kpi('Снабжение / Топливо', `${s.supply} / ${s.fuel}`)}
+    </div>
+    <h3>Снаряжение и производство</h3>
+    <table>
+      <tr><th>Снаряжение</th><th>Кол-во</th><th>IC</th></tr>
+      ${s.equipment.map(e => `<tr><td>${e.name}</td><td>${e.count}</td><td>${e.ic_total}</td></tr>`).join('')}
+    </table>
+    <div style="font-size:12px;color:var(--mut);margin-top:4px">
+      Ресурсы (ед.): ${Object.entries(s.resources).map(([k, v]) => `${k}: ${v}`).join(', ') || '—'}
+    </div>
+    ${s.warnings.map(w => `<div class="warn">⚠ ${w}</div>`).join('')}
+  `;
+}
+
+async function calcBoth() {
+  for (const side of ['attacker', 'defender']) {
+    const r = await post('/api/calculate', readTpl(side));
+    document.getElementById(side + '_stats').innerHTML = r.error ? `<div class="warn">${r.error}</div>` : statsHtml(r);
+  }
+}
+
+function drawChart(tl) {
+  const c = document.getElementById('ch');
+  if (!c) return;
+  const g = c.getContext('2d');
+  g.clearRect(0, 0, c.width, c.height);
+  g.strokeStyle = '#2d343e';
+  for (let p = 25; p <= 75; p += 25) {
+    const y = c.height - 8 - p / 100 * (c.height - 16);
+    g.beginPath(); g.moveTo(0, y); g.lineTo(c.width, y); g.stroke();
+  }
+  const line = (key, col, dash=[]) => {
+    g.strokeStyle = col; g.lineWidth = 2; g.setLineDash(dash); g.beginPath();
+    tl.forEach((p, i) => {
+      const x = i / Math.max(1, tl.length - 1) * (c.width - 16) + 8;
+      const y = c.height - 8 - p[key] / 100 * (c.height - 16);
+      i ? g.lineTo(x, y) : g.moveTo(x, y);
+    });
+    g.stroke();
+  };
+  line('attacker_avg_org_pct', '#ff6b6b');
+  line('attacker_avg_hp_pct', '#b03a3a', [4, 4]);
+  line('defender_avg_org_pct', '#5ca8ff');
+  line('defender_avg_hp_pct', '#2e5d99', [4, 4]);
+  g.setLineDash([]);
+}
+
+async function simulate() {
+  const r = await post('/api/simulate', {attacker: readTpl('attacker'), defender: readTpl('defender'), config: readCfg()});
+  const el = document.getElementById('result');
+  if (r.error) { el.innerHTML = `<div class="warn">${r.error}</div>`; return; }
+  document.getElementById('attacker_stats').innerHTML = statsHtml(r.attacker_stats);
+  document.getElementById('defender_stats').innerHTML = statsHtml(r.defender_stats);
+
+  const sm = x => `<td>${x.divisions_remaining}/${x.divisions_total}</td><td>${x.manpower_lost}</td><td>${x.manpower_trickleback}</td><td>${x.ic_lost}</td><td>${x.ic_captured}</td><td>${x.armor_pierced_status}</td><td>${x.width_used} (${(x.overwidth_penalty*100).toFixed(1)}%)</td>`;
+  const last = r.timeline[r.timeline.length - 1] || {};
+  el.innerHTML = `
+    <div class="win-banner win-${r.winner}">${r.winner_ru} — ${r.hours_lasted} ч (${r.days_lasted} дн.) | Ширина поля: ${r.battlefield_width}</div>
+    <div style="font-size:12px;color:var(--mut);margin-bottom:6px">
+      <span style="color:#ff6b6b">■ Орг. атаки</span> &nbsp;
+      <span style="color:#b03a3a">-- HP атаки</span> &nbsp;
+      <span style="color:#5ca8ff">■ Орг. обороны</span> &nbsp;
+      <span style="color:#2e5d99">-- HP обороны</span> &nbsp;|&nbsp;
+      Последняя тактика: Атака «${last.attacker_tactic || '—'}» vs Оборона «${last.defender_tactic || '—'}»
+    </div>
+    <canvas id="ch" width="960" height="220"></canvas>
+    <table style="margin-top:10px">
+      <tr><th>Сторона</th><th>Див.</th><th>Потери людей</th><th>Спасено (Госп.)</th><th>Потери IC</th><th>Трофеи IC</th><th>Броня</th><th>Ширина (штраф)</th></tr>
+      <tr><td>🔴 Атака</td>${sm(r.attacker_summary)}</tr>
+      <tr><td>🔵 Оборона</td>${sm(r.defender_summary)}</tr>
+    </table>
+    <h3>Лог боя</h3>
+    ${r.events.map(e => `<div style="font-size:13px">${e}</div>`).join('')}
+  `;
+  drawChart(r.timeline);
+}
+
+function renderEqTable() {
+  const q = (document.getElementById('eq_search').value || '').toLowerCase();
+  const maxY = +document.getElementById('eq_year').value || 1950;
+  const rows = C.equipment.filter(e => e.year <= maxY && (e.name.toLowerCase().includes(q) || e.id.toLowerCase().includes(q)));
+  document.getElementById('eq_table').innerHTML = `
+    <tr><th>Название</th><th>Год</th><th>IC</th><th>Мягк.</th><th>Жёстк.</th><th>Защ.</th><th>Прор.</th><th>Проб.</th><th>Броня</th><th>ПВО</th><th>Скор.</th><th>Над.</th></tr>
+    ${rows.slice(0, 120).map(e => `<tr>
+      <td>${e.name} <small style="color:var(--mut)">(${e.id})</small></td>
+      <td>${e.year}</td><td><b>${e.build_cost_ic}</b></td>
+      <td>${e.soft_attack}</td><td>${e.hard_attack}</td><td>${e.defense}</td><td>${e.breakthrough}</td>
+      <td>${e.ap_attack}</td><td>${e.armor_value}</td><td>${e.air_attack}</td><td>${e.maximum_speed}</td><td>${(e.reliability*100).toFixed(0)}%</td>
+    </tr>`).join('')}
+  `;
+}
+
+async function previewTank(autoMeta = false) {
+  const chassis = document.getElementById('tk_chassis').value;
+  const role = document.getElementById('tk_role').value;
+  const year = +document.getElementById('tk_year').value;
+  let modules = null;
+  if (!autoMeta) {
+    const selects = document.querySelectorAll('#tk_mods select');
+    if (selects.length) {
+      modules = {};
+      selects.forEach(s => { if (s.value) modules[s.dataset.slot] = s.value; });
+    }
+  }
+  const d = await post('/api/tank_design', {chassis, role, year, modules});
+  if (autoMeta || !document.querySelectorAll('#tk_mods select').length) {
+    const slots = ['turret_type_slot', 'main_armament_slot', 'suspension_type_slot', 'armor_type_slot', 'engine_type_slot'];
+    const catFilter = {
+      turret_type_slot: m => m.category.includes('turret_type'),
+      main_armament_slot: m => m.category.includes('main_armament') || m.category === 'tank_flamethrower',
+      suspension_type_slot: m => m.category.includes('suspension_type'),
+      armor_type_slot: m => m.category === 'tank_armor_type',
+      engine_type_slot: m => m.category === 'tank_engine_type',
+    };
+    document.getElementById('tk_mods').innerHTML = slots.map(sl => {
+      const opts = C.tank_modules.filter(catFilter[sl]).map(m => `<option value="${m.id}" ${(d.modules[sl]===m.id)?'selected':''}>${m.name} (${m.year})</option>`).join('');
+      return `<div><label>${sl}</label><select data-slot="${sl}" onchange="previewTank(false)"><option value="">—</option>${opts}</select></div>`;
+    }).join('');
+  }
+  document.getElementById('tk_out').innerHTML = `
+    <div class="stat-grid">
+      <div class="kpi"><b>${d.build_cost_ic.toFixed(2)}</b><span>Стоимость IC</span></div>
+      <div class="kpi"><b>${d.soft_attack.toFixed(1)} / ${d.hard_attack.toFixed(1)}</b><span>Мягк. / Жёстк.</span></div>
+      <div class="kpi"><b>${d.breakthrough.toFixed(1)} / ${d.defense.toFixed(1)}</b><span>Прорыв / Защита</span></div>
+      <div class="kpi"><b>${d.armor_value.toFixed(1)} / ${d.ap_attack.toFixed(1)}</b><span>Броня / Пробитие</span></div>
+      <div class="kpi"><b>${d.maximum_speed.toFixed(1)} км/ч</b><span>Макс. скорость</span></div>
+      <div class="kpi"><b>${(d.reliability*100).toFixed(0)}%</b><span>Надёжность</span></div>
+    </div>
+    ${(d.warnings || []).map(w => `<div class="warn">⚠ ${w}</div>`).join('')}
+  `;
+}
+
+let ARENA_RES = null;
+
+function applyArenaTpl(side, id) {
+  if (!ARENA_RES) return;
+  const item = ARENA_RES.best_defense.find(x => x.id === id);
+  if (!item) return;
+  document.getElementById(side + '_preset').value = '';
+  document.getElementById(side + '_year').value = +document.getElementById('ar_year').value;
+  document.getElementById(side + '_doc').value = item.doctrine || '';
+  for (const u of C.line_units) {
+    document.getElementById(`${side}_b_${u.id}`).value = item.battalions[u.id] || 0;
+  }
+  document.querySelectorAll(`#${side}_sup input`).forEach(i => i.checked = item.support.includes(i.value));
+  document.querySelectorAll(`#${side}_reg input`).forEach(i => i.checked = item.regimental.includes(i.value));
+  calcBoth();
+  showTab('sim', document.querySelector('.tabs .tab'));
+}
+
+function arenaTable(title, list, modeKey) {
+  const vsStr = m => Object.entries(m).map(([k, v]) => `${k}: <b>${v}%</b>`).join(', ');
+  return `
+    <div class="card" style="margin-bottom:14px">
+      <h2>${title}</h2>
+      <div style="overflow-x:auto">
+        <table>
+          <tr>
+            <th>#</th><th>Шаблон</th><th>Шир.</th><th>IC</th><th>Див.</th>
+            <th>КПД Обр.</th><th>Удерж.%</th><th>Размен IC (Обр.)</th><th>Размен МП (Обр.)</th>
+            <th>КПД Атк.</th><th>Побед Атк.%</th><th>Универсал</th>
+            <th>Удержание против архетипов</th><th>В симулятор</th>
+          </tr>
+          ${list.slice(0, 12).map((x, idx) => `<tr>
+            <td><b>${idx + 1}</b></td>
+            <td><b>${x.name}</b><br><small style="color:var(--mut)">Мягк:${x.soft} Жёст:${x.hard} Защ:${x.defense} Прор:${x.brk} Бр:${x.armor}/${x.pierce}</small></td>
+            <td>${x.width}w</td><td>${x.ic_cost}</td><td>${x.div_count}</td>
+            <td><b style="color:var(--blu)">${x.defense_kpd}</b></td>
+            <td>${x.def_hold_pct}% (${x.def_win_pct}% поб.)</td>
+            <td><b>${x.def_ic_ratio}x</b></td>
+            <td>${x.def_mp_ratio}x</td>
+            <td><b style="color:var(--red)">${x.offense_kpd}</b></td>
+            <td>${x.atk_win_pct}%</td>
+            <td><b style="color:var(--grn)">${x.universal_kpd}</b></td>
+            <td style="font-size:11px">${vsStr(x.def_vs_archetype)}</td>
+            <td>
+              <button class="btn sec" style="margin:0;padding:3px 6px;font-size:11px" onclick="applyArenaTpl('defender','${x.id}')">В Оборону</button>
+              <button class="btn sec" style="margin:2px 0 0;padding:3px 6px;font-size:11px" onclick="applyArenaTpl('attacker','${x.id}')">В Атаку</button>
+            </td>
+          </tr>`).join('')}
+        </table>
+      </div>
+    </div>
+  `;
+}
+
+async function runArena() {
+  const st = document.getElementById('ar_status');
+  st.textContent = 'Идёт круговой турнир...';
+  const r = await post('/api/arena', {
+    tech_year: +document.getElementById('ar_year').value,
+    terrain: document.getElementById('ar_ter').value,
+    river: document.getElementById('ar_riv').value,
+    fort_level: +document.getElementById('ar_fort').value,
+    balance_mode: document.getElementById('ar_mode').value,
+    ic_budget: +document.getElementById('ar_budget').value,
+    include_tanks: document.getElementById('ar_tanks').checked,
+    include_special: document.getElementById('ar_spec').checked,
+  });
+  if (r.error) { st.innerHTML = `<span class="warn">${r.error}</span>`; return; }
+  ARENA_RES = r;
+  st.textContent = `Готово за ${r.elapsed_sec} сек! Шаблонов: ${r.templates_count}, проведено боёв: ${r.total_battles} (${r.terrain}, режим: ${r.balance_mode}).`;
+  document.getElementById('ar_out').innerHTML =
+    arenaTable('🩸 Топ-12 по размену людей (макс. потерь врага на свои потери)', r.best_mp_saver, 'mp') +
+    arenaTable('🛡 Топ-12 лучших в ОБОРОНЕ (по КПД и низким потерям IC/людей)', r.best_defense, 'def') +
+    arenaTable('🌟 Топ-12 лучших УНИВЕРСАЛОВ (Оборона + Атака)', r.best_universal, 'uni') +
+    arenaTable('⚔ Топ-12 лучших в АТАКЕ', r.best_offense, 'atk');
+}
+
+async function runUpgradeStudy() {
+  const st = document.getElementById('ar_status');
+  st.textContent = 'Считаю все 25-батальонные фулл-шаблоны и кривую роста эффективности...';
+  const r = await post('/api/upgrade_study', {
+    tech_year: +document.getElementById('ar_year').value,
+    terrain: document.getElementById('ar_ter').value,
+  });
+  if (r.error) { st.innerHTML = `<span class="warn">${r.error}</span>`; return; }
+  st.textContent = `Готово за ${r.elapsed_sec} сек (${r.tech_year} г., ${r.terrain}).`;
+
+  const row = (x, idx) => `<tr>
+    <td><b>${idx + 1}</b></td><td><b>${x.name}</b><br><small style="color:var(--mut)">${x.change}</small></td>
+    <td>${x.width}w</td><td><b>${x.ic_cost}</b></td><td>${x.hardness}%</td><td>${x.armor} / ${x.pierce}</td>
+    <td>${x.hold_pct}%</td><td>${x.avg_own_mp}</td><td>${x.avg_enemy_mp}</td>
+    <td><b style="color:var(--grn)">${x.mp_ratio}x</b></td><td>${x.ic_ratio}x</td>
+  </tr>`;
+
+  document.getElementById('ar_study').innerHTML = `
+    <div class="card" style="margin-bottom:14px">
+      <h2>📈 График роста эффективности при удорожании шаблона (IC → Размен людей и Удержание%)</h2>
+      <div style="font-size:12px;color:var(--mut);margin-bottom:6px">
+        <span style="color:#6be084">■ Размен людей (враг/свои, x)</span> &nbsp;
+        <span style="color:#5ca8ff">-- % удержания обороны</span>
+      </div>
+      <canvas id="ch_up" width="960" height="220"></canvas>
+      <table style="margin-top:10px">
+        <tr><th>#</th><th>Ступень апгрейда (что на что меняем)</th><th>Шир.</th><th>IC</th><th>Hardness</th><th>Броня/Проб.</th><th>Удерж.</th><th>Свои МП</th><th>МП врага</th><th>Размен МП</th><th>Размен IC</th></tr>
+        ${r.upgrade_curve.map(row).join('')}
+      </table>
+    </div>
+    <div class="card">
+      <h2>🏰 Все максимальные шаблоны (25 батальонов + 5 поддержки + 5 полковых) в обороне против любого врага</h2>
+      <table>
+        <tr><th>#</th><th>Фулл-шаблон</th><th>Шир.</th><th>IC</th><th>Hardness</th><th>Броня/Проб.</th><th>Удерж.</th><th>Свои МП</th><th>МП врага</th><th>Размен МП</th><th>Размен IC</th></tr>
+        ${r.fullslot_ranking.map(row).join('')}
+      </table>
+    </div>
+  `;
+
+  const c = document.getElementById('ch_up'), g = c.getContext('2d'), pts = r.upgrade_curve;
+  g.clearRect(0, 0, c.width, c.height);
+  const maxMp = Math.max(4, ...pts.map(p => p.mp_ratio));
+  const drawL = (vals, maxV, col, dash=[]) => {
+    g.strokeStyle = col; g.lineWidth = 2.5; g.setLineDash(dash); g.beginPath();
+    vals.forEach((v, i) => {
+      const x = 16 + i / Math.max(1, vals.length - 1) * (c.width - 32);
+      const y = c.height - 14 - (v / maxV) * (c.height - 28);
+      i ? g.lineTo(x, y) : g.moveTo(x, y);
+    });
+    g.stroke();
+    g.setLineDash([]);
+    vals.forEach((v, i) => {
+      const x = 16 + i / Math.max(1, vals.length - 1) * (c.width - 32);
+      const y = c.height - 14 - (v / maxV) * (c.height - 28);
+      g.fillStyle = col; g.beginPath(); g.arc(x, y, 4, 0, 6.28); g.fill();
+    });
+  };
+  drawL(pts.map(p => p.mp_ratio), maxMp, '#6be084');
+  drawL(pts.map(p => p.hold_pct), 100, '#5ca8ff', [5, 4]);
+}
+
+async function runEvolutionUI() {
+  const st = document.getElementById('ar_status');
+  st.textContent = 'Идёт беспристрастный эволюционный поиск от 6/0 до пика (перебор всех замен и добавлений)...';
+  const r = await post('/api/evolution', {
+    tech_year: +document.getElementById('ar_year').value,
+    terrain: document.getElementById('ar_ter').value,
+    factories: +document.getElementById('ar_fac').value,
+    ic_per_factory_day: +document.getElementById('ar_icday').value,
+    max_steps: 22,
+    beam_width: 2,
+  });
+  if (r.error) { st.innerHTML = `<span class="warn">${r.error}</span>`; return; }
+  st.textContent = `Эволюция завершена за ${r.elapsed_sec} сек! Проверено вариантов: ${r.candidates_tested}. Производительность: ${r.daily_ic} IC/день.`;
+
+  document.getElementById('ar_study').innerHTML = `
+    <div class="card">
+      <h2>🧬 Эволюционный путь роста от 6/0 (без пресетов, по дням работы ${r.factories} заводов)</h2>
+      <div style="font-size:12px;color:var(--mut);margin-bottom:6px">
+        <span style="color:#6be084">■ Размен людей (враг/свои, x)</span> &nbsp;
+        <span style="color:#5ca8ff">-- % удержания обороны</span>
+      </div>
+      <canvas id="ch_evo" width="960" height="220"></canvas>
+      <table style="margin-top:10px">
+        <tr><th>Шаг</th><th>Лучшее изменение (найдено поиском)</th><th>Шир.</th><th>IC</th><th>Дней (1 див / фронт)</th><th>Hardness</th><th>Броня/Проб.</th><th>Удерж.</th><th>Свои МП</th><th>МП врага</th><th>Размен МП</th></tr>
+        ${r.steps.map(x => `<tr>
+          <td><b>${x.step}</b></td><td><b>${x.action}</b></td>
+          <td>${x.width}w</td><td>${x.ic_cost}</td><td>${x.factory_days_1div} / ${x.factory_days_front} дн.</td>
+          <td>${x.hardness}%</td><td>${x.armor} / ${x.pierce}</td>
+          <td>${x.hold_pct}%</td><td>${x.avg_own_mp}</td><td>${x.avg_enemy_mp}</td>
+          <td><b style="color:var(--grn)">${x.mp_ratio}x</b></td>
+        </tr>`).join('')}
+      </table>
+    </div>
+  `;
+  const c = document.getElementById('ch_evo'), g = c.getContext('2d'), pts = r.steps;
+  g.clearRect(0, 0, c.width, c.height);
+  const maxMp = Math.max(3, ...pts.map(p => p.mp_ratio));
+  const drawL = (vals, maxV, col, dash=[]) => {
+    g.strokeStyle = col; g.lineWidth = 2.5; g.setLineDash(dash); g.beginPath();
+    vals.forEach((v, i) => {
+      const x = 16 + i / Math.max(1, vals.length - 1) * (c.width - 32);
+      const y = c.height - 14 - (v / maxV) * (c.height - 28);
+      i ? g.lineTo(x, y) : g.moveTo(x, y);
+    });
+    g.stroke();
+    g.setLineDash([]);
+  };
+  drawL(pts.map(p => p.mp_ratio), maxMp, '#6be084');
+  drawL(pts.map(p => p.hold_pct), 100, '#5ca8ff', [5, 4]);
+}
+
+async function runBudgetCurveUI() {
+  const st = document.getElementById('ar_status');
+  st.textContent = 'Считаю лучший шаблон обороны на каждом шаге +200 IC против любого врага до 1.5x бюджета...';
+  const r = await post('/api/budget_curve', {
+    tech_year: +document.getElementById('ar_year').value,
+    terrain: document.getElementById('ar_ter').value,
+    start_ic: 600,
+    end_ic: 5600,
+    step_ic: 200,
+    enemy_mult: 1.5,
+  });
+  if (r.error) { st.innerHTML = `<span class="warn">${r.error}</span>`; return; }
+  st.textContent = `Готово за ${r.elapsed_sec} сек! Пул шаблонов: ${r.pool_size}, шаг +${r.step_ic} IC, враг до ${r.enemy_mult}x бюджета.`;
+
+  document.getElementById('ar_study').innerHTML = `
+    <div class="card">
+      <h2>💰 Лучший шаблон обороны на каждом шаге +200 IC (против врага с преимуществом до 1.5x IC)</h2>
+      <div style="font-size:12px;color:var(--mut);margin-bottom:6px">
+        <span style="color:#6be084">■ Размен людей (враг/свои, x)</span> &nbsp;
+        <span style="color:#5ca8ff">-- % удержания обороны</span>
+      </div>
+      <canvas id="ch_bc" width="960" height="220"></canvas>
+      <table style="margin-top:10px">
+        <tr><th>Бюджет (враг ≤1.5x)</th><th>Лучший шаблон обороны</th><th>Цена IC</th><th>Шир.</th><th>Hardness</th><th>Броня</th><th>Удерж.</th><th>Свои МП</th><th>МП врага</th><th>Размен МП</th></tr>
+        ${r.steps.map(x => `<tr>
+          <td><b>${x.budget_ic}</b> <small style="color:var(--mut)">(≤${x.enemy_max_ic})</small></td>
+          <td><b>${x.name}</b></td>
+          <td>${x.ic_cost}</td><td>${x.width}w</td><td>${x.hardness}%</td><td>${x.armor}</td>
+          <td>${x.hold_pct}%</td><td>${x.avg_own_mp}</td><td>${x.avg_enemy_mp}</td>
+          <td><b style="color:var(--grn)">${x.mp_ratio}x</b></td>
+        </tr>`).join('')}
+      </table>
+    </div>
+  `;
+  const c = document.getElementById('ch_bc'), g = c.getContext('2d'), pts = r.steps;
+  g.clearRect(0, 0, c.width, c.height);
+  const maxMp = Math.max(4, ...pts.map(p => p.mp_ratio));
+  const drawL = (vals, maxV, col, dash=[]) => {
+    g.strokeStyle = col; g.lineWidth = 2.5; g.setLineDash(dash); g.beginPath();
+    vals.forEach((v, i) => {
+      const x = 16 + i / Math.max(1, vals.length - 1) * (c.width - 32);
+      const y = c.height - 14 - (v / maxV) * (c.height - 28);
+      i ? g.lineTo(x, y) : g.moveTo(x, y);
+    });
+    g.stroke();
+    g.setLineDash([]);
+  };
+  drawL(pts.map(p => p.mp_ratio), maxMp, '#6be084');
+  drawL(pts.map(p => p.hold_pct), 100, '#5ca8ff', [5, 4]);
+}
+
+init();
+</script>
+</body>
+</html>
