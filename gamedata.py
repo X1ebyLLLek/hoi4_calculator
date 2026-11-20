@@ -27,6 +27,7 @@ class GameData:
         self.equipment: Dict[str, dict] = raw["equipment"]
         self.modules: Dict[str, dict] = raw["modules"]
         self.tactics: Dict[str, dict] = raw["tactics"]
+        self.leader_skills: Dict[str, Dict[str, float]] = raw.get("leader_skills", {})
         self.terrain: Dict[str, dict] = raw["terrain"]
         self.doctrines: Dict[str, Any] = raw["doctrines"]
         self.techs: Dict[str, dict] = raw["techs"]
@@ -37,6 +38,21 @@ class GameData:
     # ----------------------------------------------------------- misc
     def d(self, key: str, default: float = 0.0) -> float:
         return self.defines.get(key, default)
+
+    def leader_skill_bonus(self, kind: str, level: int) -> float:
+        """Return corps commander attack/defense modifier for ``level`` from extracted unit_leader files."""
+        if level <= 0:
+            return 0.0
+        table = self.leader_skills.get(kind) or {}
+        if str(level) in table:
+            return float(table[str(level)])
+        # Extrapolate linearly from extracted skill levels if level exceeds table
+        numeric = sorted((int(k), float(v)) for k, v in table.items() if str(k).isdigit())
+        if numeric:
+            max_lvl, max_val = numeric[-1]
+            step = (max_val / max_lvl) if max_lvl > 0 else 0.025
+            return round(step * level, 6)
+        return 0.025 * level
 
     def name(self, key: str) -> str:
         return self.loc.get(key) or self.loc.get(key.upper()) or key.replace("_", " ").title()

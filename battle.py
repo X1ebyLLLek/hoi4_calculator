@@ -1,12 +1,13 @@
 """HoI4 1.19.5.0+ Exact Defines-Driven Land Battle Simulator."""
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 import random
 
 from . import gamedata
 from .gamedata import GameData
 from .division import DivisionTemplate, calculate_division
+from .pdx import as_list
 
 
 @dataclass
@@ -23,6 +24,11 @@ class BattleConfig:
     attacker_general_atk: int = 3
     defender_general_skill: int = 3
     defender_general_def: int = 3
+    attacker_traits: List[str] = field(default_factory=list)
+    defender_traits: List[str] = field(default_factory=list)
+    attacker_tag: str = ""
+    defender_tag: str = ""
+    province_vp: int = 0
     attacker_xp_mod: float = 0.25     # Regular = +0.25
     defender_xp_mod: float = 0.25
     air_superiority: float = 0.0      # -1.0 (full defender air) to +1.0 (full attacker air)
@@ -31,6 +37,7 @@ class BattleConfig:
     supply_lack_atk: float = 0.0      # 0.0..1.0 (0 = full supply, 1 = no supply)
     supply_lack_def: float = 0.0
     include_night: bool = True
+    roll_dice: bool = False           # True = exact hit/damage dice rolls; False = expected values
     max_hours: int = 720
     seed: Optional[int] = 42
 
@@ -68,6 +75,169 @@ def _piercing_damage_mult(gd: GameData, piercing: float, armor: float) -> Tuple[
     return dmg_mult, unpierced, status
 
 
+def _eval_cmp(actual: float, spec: Any) -> bool:
+    """Evaluate a Paradox numeric comparison (e.g. ``{"op": ">", "value": 2}``)."""
+    if isinstance(spec, dict) and "op" in spec and "value" in spec:
+        op = spec["op"]
+        target = float(spec["value"])
+        if op == ">":
+            return actual > target
+        if op == "<":
+            return actual < target
+        if op == ">=":
+            return actual >= target
+        if op == "<=":
+            return actual <= target
+        if op in ("=", "=="):
+            return actual == target
+        if op == "!=":
+            return actual != target
+        return False
+    return actual == float(spec)
+
+
+def _eval_trigger_item(key: str, val: Any, ctx: Dict[str, Any], gd: GameData) -> bool:
+    if key == "AND":
+        return _eval_trigger_block(val, ctx, gd, mode="AND")
+    if key == "OR":
+        return _eval_trigger_block(val, ctx, gd, mode="OR")
+    if key == "NOT":
+        # Paradox NOT = { A B } is NOR (true iff none of the conditions hold).
+        return not _eval_trigger_block(val, ctx, gd, mode="OR")
+    if key in ("OWNER", "custom_trigger_tooltip"):
+        return _eval_trigger_block(val, ctx, gd, mode="AND")
+    if key == "tooltip":
+        return True
+    if key == "is_attacker":
+        return bool(val) == ctx["is_attacker"]
+    if key == "phase":
+        if val in (False, "no"):
+            return ctx["phase"] == "no"
+        return ctx["phase"] == str(val)
+    if key == "skill":
+        return _eval_cmp(ctx["skill"], val)
+    if key == "skill_advantage":
+        return _eval_cmp(ctx["skill_adv"], val)
+    if key == "frontage_full":
+        return bool(val) == ctx["frontage_full"]
+    if key == "has_reserves":
+        return bool(val) == ctx["has_reserves"]
+    if key == "hardness":
+        return _eval_cmp(ctx["hardness"], val)
+    if key == "has_artillery_ratio":
+        return _eval_cmp(ctx["arty_ratio"], val)
+    if key == "is_fighting_in_terrain":
+        return str(val) == ctx["terrain_id"]
+    if key == "has_combat_modifier":
+        if val == "river_crossing":
+            return bool(ctx["has_river"])
+        return False
+    if key == "has_trait":
+        return str(val) in ctx["traits"]
+    if key == "tag":
+        return bool(ctx["tag"]) and ctx["tag"].upper() == str(val).upper()
+    if key == "has_tactic":
+        tid = str(val)
+        return tid in ctx["unlocked"] or bool(gd.tactics.get(tid, {}).get("active", False))
+    if key == "has_unit_type":
+        return str(val) in ctx["unit_types"]
+    if key == "province_vp":
+        return _eval_cmp(ctx["province_vp"], val)
+    return False
+
+
+def _eval_trigger_block(block: Any, ctx: Dict[str, Any], gd: GameData, mode: str = "AND") -> bool:
+    if not block:
+        return True if mode == "AND" else False
+    if isinstance(block, list):
+        results = [_eval_trigger_block(sub, ctx, gd, mode="AND") for sub in block]
+        return all(results) if mode == "AND" else any(results)
+    if not isinstance(block, dict):
+        return False
+
+    results: List[bool] = []
+    for key, val in block.items():
+        if key == "tooltip":
+            continue
+        if isinstance(val, list):
+            for item in val:
+                results.append(_eval_trigger_item(key, item, ctx, gd))
+        else:
+            results.append(_eval_trigger_item(key, val, ctx, gd))
+
+    if not results:
+        return True if mode == "AND" else False
+    return all(results) if mode == "AND" else any(results)
+
+
+def _eval_tactic_weight(base: Any, ctx: Dict[str, Any], gd: GameData) -> float:
+    if not isinstance(base, dict):
+        return 1.0
+    w = float(base.get("factor", 1.0))
+    for mod in as_list(base.get("modifier")):
+        if not isinstance(mod, dict):
+            continue
+        cond = {k: v for k, v in mod.items() if k not in ("add", "factor")}
+        if _eval_trigger_block(cond, ctx, gd, mode="AND"):
+            if "add" in mod:
+                w += float(mod["add"])
+            if "factor" in mod:
+                w *= float(mod["factor"])
+    return max(0.0, w)
+
+
+def _aa_air_sup_reduction(aa: float, max_red: float, steepness: float) -> float:
+    """Exact HoI4 diminishing-returns curve from 00_defines.lua: a * (xp / (xp + b)), xp = aa^1.5."""
+    if aa <= 0.0 or max_red <= 0.0:
+        return 0.0
+    xp = aa ** 1.5
+    return max_red * (xp / (xp + max(1e-6, steepness)))
+
+
+def _roll_hits(n_attacks: float, hit_chance: float, rng: random.Random) -> int:
+    """Resolve fractional attack count into exact Bernoulli hit rolls."""
+    if n_attacks <= 0.0 or hit_chance <= 0.0:
+        return 0
+    trials = int(n_attacks)
+    if rng.random() < (n_attacks - trials):
+        trials += 1
+    if hit_chance >= 1.0:
+        return trials
+    return sum(1 for _ in range(trials) if rng.random() < hit_chance)
+
+
+def _resolve_damage(
+    t_atk: float,
+    t_def: float,
+    hit_prot: float,
+    hit_unprot: float,
+    org_dice_size: float,
+    str_dice_size: float,
+    org_mod: float,
+    str_mod: float,
+    dmg_mult: float,
+    rng: random.Random,
+    roll_dice: bool,
+) -> Tuple[float, float]:
+    """Compute (org_dmg, str_dmg) using either expected values or exact game dice rolls."""
+    prot_atk = min(t_atk, t_def)
+    unprot_atk = max(0.0, t_atk - t_def)
+    if not roll_dice:
+        hits = prot_atk * hit_prot + unprot_atk * hit_unprot
+        o_avg = (1.0 + org_dice_size) / 2.0
+        s_avg = (1.0 + str_dice_size) / 2.0
+        return hits * org_mod * o_avg * dmg_mult, hits * str_mod * s_avg * dmg_mult
+
+    hits = _roll_hits(prot_atk, hit_prot, rng) + _roll_hits(unprot_atk, hit_unprot, rng)
+    if hits <= 0:
+        return 0.0, 0.0
+    o_sides = max(1, int(round(org_dice_size)))
+    s_sides = max(1, int(round(str_dice_size)))
+    o_pips = sum(rng.randint(1, o_sides) for _ in range(hits))
+    s_pips = sum(rng.randint(1, s_sides) for _ in range(hits))
+    return o_pips * org_mod * dmg_mult, s_pips * str_mod * dmg_mult
+
+
 def _pick_tactic(
     gd: GameData,
     rng: random.Random,
@@ -81,8 +251,32 @@ def _pick_tactic(
     frontage_full: bool,
     has_reserves: bool,
     terrain_id: str,
+    *,
+    has_river: bool = False,
+    traits: Optional[Iterable[str]] = None,
+    tag: str = "",
+    unit_types: Optional[Iterable[str]] = None,
+    province_vp: int = 0,
 ) -> Tuple[str, dict]:
-    """Pick an eligible combat tactic from extracted 1.19.5.0 tactics."""
+    """Pick an eligible combat tactic from extracted 1.19.5.0 tactics using full trigger evaluation."""
+    ctx: Dict[str, Any] = {
+        "is_attacker": is_attacker,
+        "phase": phase,
+        "unlocked": set(unlocked),
+        "hardness": hardness,
+        "arty_ratio": arty_ratio,
+        "skill": float(skill),
+        "skill_adv": float(skill_adv),
+        "frontage_full": frontage_full,
+        "has_reserves": has_reserves,
+        "terrain_id": terrain_id,
+        "has_river": has_river,
+        "traits": set(traits or ()),
+        "tag": tag or "",
+        "unit_types": set(unit_types or ()),
+        "province_vp": float(province_vp),
+    }
+
     cands: List[Tuple[str, dict, float]] = []
     for tid, t in gd.tactics.items():
         if bool(t.get("is_attacker")) != is_attacker:
@@ -90,25 +284,9 @@ def _pick_tactic(
         if not t.get("active", True) and tid not in unlocked:
             continue
         trig = t.get("trigger") or {}
-        t_phase = trig.get("phase", False)
-        if phase == "no" and t_phase not in (False, "no"):
+        if not _eval_trigger_block(trig, ctx, gd, mode="AND"):
             continue
-        if phase != "no" and t_phase != phase:
-            continue
-        if trig.get("frontage_full") and not frontage_full:
-            continue
-        if trig.get("has_reserves") and not has_reserves:
-            continue
-        if isinstance(trig.get("has_artillery_ratio"), dict):
-            if arty_ratio <= trig["has_artillery_ratio"].get("value", 0):
-                continue
-        if isinstance(trig.get("hardness"), dict):
-            if hardness <= trig["hardness"].get("value", 0):
-                continue
-        if trig.get("is_fighting_in_terrain") and trig["is_fighting_in_terrain"] != terrain_id:
-            continue
-        base = t.get("base")
-        w = float(base.get("factor", 1)) if isinstance(base, dict) else 1.0
+        w = _eval_tactic_weight(t.get("base"), ctx, gd)
         if w > 0:
             cands.append((tid, t, w))
 
@@ -231,10 +409,24 @@ def simulate_battle_stats(
     planning_left = min(config.attacker_planning, max_plan)
     planning_decay_hr = gd.d("PLANNING_DECAY", 0.01) / 24.0 * (1.0 + atk_stats["scalar"].get("planning_decay_rate_factor", 0.0))
 
-    # AA mitigation
-    max_aa_red = gd.d("MAX_ANTI_AIR_REDUCTION_EFFECT_ON_INCOMING_AIR_DAMAGE", 0.75)
-    atk_aa_red = min(max_aa_red, atk_stats["air"] * 0.015)
-    def_aa_red = min(max_aa_red, def_stats["air"] * 0.015)
+    # Leader attack / defense skill bonuses from common/unit_leader/
+    atk_gen_bonus = gd.leader_skill_bonus("attack", config.attacker_general_atk)
+    def_gen_bonus = gd.leader_skill_bonus("defense", config.defender_general_def)
+
+    # Air superiority & AA mitigation from 00_defines.lua
+    air_sup_impact = abs(gd.d("ENEMY_AIR_SUPERIORITY_IMPACT", -0.35))
+    aa_sup_max = gd.d("ENEMY_AIR_SUPERIORITY_DEFENSE", 0.75)
+    aa_sup_steep = gd.d("ENEMY_AIR_SUPERIORITY_DEFENSE_STEEPNESS", 625.0)
+    atk_air_sup_aa_red = _aa_air_sup_reduction(atk_stats["air"], aa_sup_max, aa_sup_steep)
+    def_air_sup_aa_red = _aa_air_sup_reduction(def_stats["air"], aa_sup_max, aa_sup_steep)
+
+    aa_cas_max = gd.d(
+        "ANTI_AIR_MAXIMUM_DAMAGE_REDUCTION_FACTOR",
+        gd.d("MAX_ANTI_AIR_REDUCTION_EFFECT_ON_INCOMING_AIR_DAMAGE", 0.75),
+    )
+    aa_cas_factor = gd.d("ANTI_AIR_ATTACK_TO_DAMAGE_REDUCTION_FACTOR", 2.5) / 100.0
+    atk_cas_aa_red = min(aa_cas_max, atk_stats["air"] * aa_cas_factor)
+    def_cas_aa_red = min(aa_cas_max, def_stats["air"] * aa_cas_factor)
     air_ter_factor = 1.0 + float(ter.get("enemy_army_bonus_air_superiority_factor", 0.0))
 
     # Armor vs Piercing
@@ -250,12 +442,16 @@ def simulate_battle_stats(
     # Defines for damage resolution
     str_mod = gd.d("LAND_COMBAT_STR_DAMAGE_MODIFIER", 0.060)
     org_mod = gd.d("LAND_COMBAT_ORG_DAMAGE_MODIFIER", 0.053)
-    str_dice_avg = (1.0 + gd.d("LAND_COMBAT_STR_DICE_SIZE", 2.0)) / 2.0
-    org_dice_avg = (1.0 + gd.d("LAND_COMBAT_ORG_DICE_SIZE", 4.0)) / 2.0
-    org_armor_dice_avg = (1.0 + gd.d("LAND_COMBAT_ORG_ARMOR_ON_SOFT_DICE_SIZE", 6.0)) / 2.0
-    str_armor_dice_avg = (1.0 + gd.d("LAND_COMBAT_STR_ARMOR_ON_SOFT_DICE_SIZE", 2.0)) / 2.0
+    str_dice_size = gd.d("LAND_COMBAT_STR_DICE_SIZE", 2.0)
+    org_dice_size = gd.d("LAND_COMBAT_ORG_DICE_SIZE", 4.0)
+    org_armor_dice_size = gd.d("LAND_COMBAT_ORG_ARMOR_ON_SOFT_DICE_SIZE", 6.0)
+    str_armor_dice_size = gd.d("LAND_COMBAT_STR_ARMOR_ON_SOFT_DICE_SIZE", 2.0)
+    cas_org_dmg_mod = gd.d("LAND_AIR_COMBAT_ORG_DAMAGE_MODIFIER", 0.035)
+    cas_str_dmg_mod = gd.d("LAND_AIR_COMBAT_STR_DAMAGE_MODIFIER", 0.035)
+    cas_org_dice_size = gd.d("LAND_AIR_COMBAT_ORG_DICE_SIZE", 5.0)
+    cas_str_dice_size = gd.d("LAND_AIR_COMBAT_STR_DICE_SIZE", 2.0)
 
-    hit_prot = gd.d("COMBAT_BASE_HIT_CHANCE", 0.10)
+    hit_prot = (100.0 - gd.d("BASE_CHANCE_TO_AVOID_HIT", 90.0)) / 100.0
     hit_unprot = (100.0 - gd.d("CHANCE_TO_AVOID_HIT_AT_NO_DEF", 60.0)) / 100.0
     night_pen = gd.d("BASE_NIGHT_ATTACK_PENALTY", -0.50)
     tactic_swap_hrs = int(gd.d("TACTIC_SWAP_FREQUENCEY", 12))
@@ -264,6 +460,9 @@ def simulate_battle_stats(
 
     atk_unlocked = set(atk_stats["tactics"])
     def_unlocked = set(def_stats["tactics"])
+    atk_unit_types: Set[str] = {u["id"] for u in atk_stats.get("units", []) if isinstance(u, dict) and "id" in u}
+    def_unit_types: Set[str] = {u["id"] for u in def_stats.get("units", []) if isinstance(u, dict) and "id" in u}
+    has_river = config.river != "none"
 
     atk_active, atk_used_w, atk_ow_pen, atk_stk_pen = _select_frontline(
         gd, atk_divs, max(0.5, atk_stats["width"]), battle_w, config.extra_flanks, 1.0, rng, initial=True
@@ -297,11 +496,15 @@ def simulate_battle_stats(
                 gd, rng, True, phase, atk_unlocked, atk_stats["hardness"], atk_stats["artillery_ratio"],
                 int(atk_eff_skill), int(atk_eff_skill - def_eff_skill),
                 atk_used_w >= battle_w * 0.9, len(atk_divs) > len(atk_active), config.terrain,
+                has_river=has_river, traits=config.attacker_traits, tag=config.attacker_tag,
+                unit_types=atk_unit_types, province_vp=config.province_vp,
             )
             def_tid, def_tac = _pick_tactic(
                 gd, rng, False, phase, def_unlocked, def_stats["hardness"], def_stats["artillery_ratio"],
                 int(def_eff_skill), int(def_eff_skill - atk_eff_skill),
                 def_used_w >= battle_w * 0.9, len(def_divs) > len(def_active), config.terrain,
+                has_river=has_river, traits=config.defender_traits, tag=config.defender_tag,
+                unit_types=def_unit_types, province_vp=config.province_vp,
             )
             if atk_tac.get("phase"):
                 phase = "no" if atk_tac["phase"] is False else str(atk_tac["phase"])
@@ -333,26 +536,26 @@ def simulate_battle_stats(
         sup_def_d = config.supply_lack_def * gd.d("COMBAT_SUPPLY_LACK_DEFENDER_DEFEND", -0.15)
 
         atk_atk_mult = max(0.10, (
-            1.0 + config.attacker_xp_mod + planning_left + config.attacker_general_atk * 0.025
+            1.0 + config.attacker_xp_mod + planning_left + atk_gen_bonus
             + ter_atk_mod + atk_tmods.get("attack", 0.0) + river_pen + fort_pen
             + atk_ow_pen + atk_stk_pen + sup_atk_a + atk_tac_mod
         ) * night_mult)
 
         atk_brk_mult = max(0.10, (
-            1.0 + config.attacker_xp_mod + planning_left + config.attacker_general_atk * 0.025
+            1.0 + config.attacker_xp_mod + planning_left + atk_gen_bonus
             + atk_ow_pen + atk_stk_pen + sup_atk_d
-            - max(0.0, -config.air_superiority * 0.35 * air_ter_factor * (1.0 - atk_aa_red))
+            - max(0.0, -config.air_superiority * air_sup_impact * air_ter_factor * (1.0 - atk_air_sup_aa_red))
         ))
 
         def_atk_mult = max(0.10, (
-            1.0 + config.defender_xp_mod + dig_in_bonus + config.defender_general_def * 0.025
+            1.0 + config.defender_xp_mod + dig_in_bonus + def_gen_bonus
             + def_tmods.get("defence", 0.0) + def_ow_pen + def_stk_pen + sup_def_a + def_tac_mod
         ) * night_mult)
 
         def_def_mult = max(0.10, (
-            1.0 + config.defender_xp_mod + dig_in_bonus + config.defender_general_def * 0.025
+            1.0 + config.defender_xp_mod + dig_in_bonus + def_gen_bonus
             + def_tmods.get("defence", 0.0) + def_ow_pen + def_stk_pen + sup_def_d
-            - max(0.0, config.air_superiority * 0.35 * air_ter_factor * (1.0 - def_aa_red))
+            - max(0.0, config.air_superiority * air_sup_impact * air_ter_factor * (1.0 - def_air_sup_aa_red))
         ))
 
         # Attacker fires on Defender (spread with DAMAGE_SPLIT_ON_FIRST_TARGET)
@@ -369,14 +572,17 @@ def simulate_battle_stats(
                     if other is not primary:
                         targets.append((other, rest_share))
 
+            o_size = org_armor_dice_size if atk_unpierced else org_dice_size
+            s_size = str_armor_dice_size if atk_unpierced else str_dice_size
             for tgt, share in targets:
                 t_atk = eff_atk * share
                 t_def = (def_stats["defense"] * def_def_mult * (tgt.hp / tgt.max_hp)) / 10.0 * share
-                hits = min(t_atk, t_def) * hit_prot + max(0.0, t_atk - t_def) * hit_unprot
-                o_dice = org_armor_dice_avg if atk_unpierced else org_dice_avg
-                s_dice = str_armor_dice_avg if atk_unpierced else str_dice_avg
-                tgt.org = max(0.0, tgt.org - hits * org_mod * o_dice * atk_vs_def_dmg_mult)
-                tgt.hp = max(0.0, tgt.hp - hits * str_mod * s_dice * atk_vs_def_dmg_mult)
+                org_dmg, str_dmg = _resolve_damage(
+                    t_atk, t_def, hit_prot, hit_unprot, o_size, s_size,
+                    org_mod, str_mod, atk_vs_def_dmg_mult, rng, config.roll_dice,
+                )
+                tgt.org = max(0.0, tgt.org - org_dmg)
+                tgt.hp = max(0.0, tgt.hp - str_dmg)
 
         # Defender fires on Attacker
         for d in def_active:
@@ -392,29 +598,34 @@ def simulate_battle_stats(
                     if other is not primary:
                         targets.append((other, rest_share))
 
+            o_size = org_armor_dice_size if def_unpierced else org_dice_size
+            s_size = str_armor_dice_size if def_unpierced else str_dice_size
             for tgt, share in targets:
                 t_atk = eff_atk * share
                 t_brk = (atk_stats["brk"] * atk_brk_mult * (tgt.hp / tgt.max_hp)) / 10.0 * share
-                hits = min(t_atk, t_brk) * hit_prot + max(0.0, t_atk - t_brk) * hit_unprot
-                o_dice = org_armor_dice_avg if def_unpierced else org_dice_avg
-                s_dice = str_armor_dice_avg if def_unpierced else str_dice_avg
-                tgt.org = max(0.0, tgt.org - hits * org_mod * o_dice * def_vs_atk_dmg_mult)
-                tgt.hp = max(0.0, tgt.hp - hits * str_mod * s_dice * def_vs_atk_dmg_mult)
+                org_dmg, str_dmg = _resolve_damage(
+                    t_atk, t_brk, hit_prot, hit_unprot, o_size, s_size,
+                    org_mod, str_mod, def_vs_atk_dmg_mult, rng, config.roll_dice,
+                )
+                tgt.org = max(0.0, tgt.org - org_dmg)
+                tgt.hp = max(0.0, tgt.hp - str_dmg)
 
         # CAS pressure
         cas_night = gd.d("CAS_NIGHT_ATTACK_FACTOR", 0.1) if is_night else 1.0
-        cas_org_mod = gd.d("LAND_AIR_COMBAT_ORG_DAMAGE_MODIFIER", 0.035) * ((1.0 + gd.d("LAND_AIR_COMBAT_ORG_DICE_SIZE", 5.0)) / 2.0)
-        cas_str_mod = gd.d("LAND_AIR_COMBAT_STR_DAMAGE_MODIFIER", 0.035) * ((1.0 + gd.d("LAND_AIR_COMBAT_STR_DICE_SIZE", 2.0)) / 2.0)
         if config.attacker_cas_dmg > 0 and def_active:
-            eff_cas = config.attacker_cas_dmg * cas_night * (1.0 - def_aa_red)
+            eff_cas = config.attacker_cas_dmg * cas_night * (1.0 - def_cas_aa_red)
             for d in def_active:
-                d.org = max(0.0, d.org - eff_cas * cas_org_mod)
-                d.hp = max(0.0, d.hp - eff_cas * cas_str_mod)
+                o_roll = rng.randint(1, max(1, int(round(cas_org_dice_size)))) if config.roll_dice else (1.0 + cas_org_dice_size) / 2.0
+                s_roll = rng.randint(1, max(1, int(round(cas_str_dice_size)))) if config.roll_dice else (1.0 + cas_str_dice_size) / 2.0
+                d.org = max(0.0, d.org - eff_cas * cas_org_dmg_mod * o_roll)
+                d.hp = max(0.0, d.hp - eff_cas * cas_str_dmg_mod * s_roll)
         if config.defender_cas_dmg > 0 and atk_active:
-            eff_cas = config.defender_cas_dmg * cas_night * (1.0 - atk_aa_red)
+            eff_cas = config.defender_cas_dmg * cas_night * (1.0 - atk_cas_aa_red)
             for a in atk_active:
-                a.org = max(0.0, a.org - eff_cas * cas_org_mod)
-                a.hp = max(0.0, a.hp - eff_cas * cas_str_mod)
+                o_roll = rng.randint(1, max(1, int(round(cas_org_dice_size)))) if config.roll_dice else (1.0 + cas_org_dice_size) / 2.0
+                s_roll = rng.randint(1, max(1, int(round(cas_str_dice_size)))) if config.roll_dice else (1.0 + cas_str_dice_size) / 2.0
+                a.org = max(0.0, a.org - eff_cas * cas_org_dmg_mod * o_roll)
+                a.hp = max(0.0, a.hp - eff_cas * cas_str_dmg_mod * s_roll)
 
         for d in atk_divs:
             if not d.retreated and (d.org <= 0 or d.hp <= 0):

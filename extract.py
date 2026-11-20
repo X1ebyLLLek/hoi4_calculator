@@ -94,6 +94,7 @@ def extract_defines(game: Path) -> Dict[str, Any]:
     keep = re.compile(
         r"^(LAND_COMBAT|COMBAT_|CHANCE_TO_AVOID|ENGAGEMENT|DAMAGE_SPLIT|PLANNING_|ARMOR_VS|SUPPLY_ORG|REINFORCE_CHANCE|"
         r"MAX_DIVISION|MAX_REGIMENTAL|MAX_DIVISION_SUPPORT|ATTRITION|AIR_SUPPORT_BASE|CAS_NIGHT|ANTI_AIR|"
+        r"ENEMY_AIR_SUPERIORITY|INITIATIVE_PICK|"
         r"PIERCING|DEFAULT_MORALE|LAND_AIR|FASTER_ORG|SLOWER_ORG|RELIABILITY_ORG|TRUCK|BASE_CAPTURE|NIGHT|"
         r"EXPERIENCE|ARMY_INITIATIVE|PARADROP|ORG_|BASE_|MAX_|TACTIC|RECON|RIVER_CROSSING|DIG_IN|UNIT_DIGIN|"
         r"EQUIPMENT_COMBAT|RELIABIL)"
@@ -179,6 +180,33 @@ def extract_terrain(game: Path) -> Dict[str, Any]:
 def extract_tactics(game: Path) -> Dict[str, Any]:
     data = parse_file(str(game / "common" / "combat_tactics.txt"))
     return {k: v for k, v in data.items() if k.startswith("tactic_")}
+
+
+def extract_leader_skills(game: Path) -> Dict[str, Dict[str, float]]:
+    """Extract corps_commander attack/defense skill bonuses from common/unit_leader/."""
+    out: Dict[str, Dict[str, float]] = {"attack": {}, "defense": {}}
+    ul_dir = game / "common" / "unit_leader"
+    specs = (
+        ("attack", "00_attack_skills.txt", "leader_attack_skills", "offence"),
+        ("defense", "00_defense_skills.txt", "leader_defense_skills", "defence"),
+    )
+    for kind, fname, root_key, mod_key in specs:
+        p = ul_dir / fname
+        if not p.exists():
+            continue
+        data = parse_file(str(p))
+        root = data.get(root_key) or {}
+        if not isinstance(root, dict):
+            continue
+        for lvl_key, entries in root.items():
+            if not str(lvl_key).isdigit():
+                continue
+            for entry in as_list(entries):
+                if isinstance(entry, dict) and entry.get("type") == "corps_commander":
+                    mod = entry.get("modifier") or {}
+                    if isinstance(mod, dict) and mod_key in mod:
+                        out[kind][str(lvl_key)] = float(mod[mod_key])
+    return out
 
 
 # --------------------------------------------------------------------- technologies
@@ -275,6 +303,7 @@ def extract_all(game: Path) -> dict:
         "modules": extract_modules(game),
         "terrain": extract_terrain(game),
         "tactics": extract_tactics(game),
+        "leader_skills": extract_leader_skills(game),
         "techs": extract_techs(game),
         "doctrines": extract_doctrines(game),
     }
